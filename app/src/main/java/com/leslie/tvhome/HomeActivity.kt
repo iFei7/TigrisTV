@@ -320,6 +320,14 @@ class HomeActivity : Activity(), TileAdapter.Listener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // This activity is directBootAware, so Android can start it at LOCKED_BOOT_COMPLETED to
+        // keep the home slot filled while the device boots. Credential-encrypted storage is not
+        // readable yet, and every preference below lives there: cover the screen and build the
+        // real home on ACTION_USER_UNLOCKED instead of crashing on the first read.
+        if (!Guard.isUserUnlocked(this)) {
+            showLockedCover()
+            return
+        }
         Tween.readScale(this)
         prefs = Prefs(this)
         glassExtreme = prefs.extremeGlass
@@ -345,6 +353,42 @@ class HomeActivity : Activity(), TileAdapter.Listener {
         })
         KeeperService.start(this)
         if (!prefs.adbAuthorized && welcome == null) main.postDelayed({ askAdbAuthorization() }, if (intro != null) 8000L else 1500L)
+    }
+
+    // ------------------------------------------------------- boot lock (direct boot)
+
+    /** True only while the screen shows the pre-unlock cover: nothing below has been initialized. */
+    private var locked = false
+    private var unlockWatcher: BroadcastReceiver? = null
+
+    /**
+     * Boot-time placeholder. The device is still locked, so no preference and no app data may be
+     * read. Paint black — what the stock FallbackHome shows in this slot anyway — then rebuild the
+     * home screen as soon as the user is unlocked.
+     */
+    private fun showLockedCover() {
+        locked = true
+        BootLog.i("event=locked_boot cover")
+        setContentView(FrameLayout(this).apply { setBackgroundColor(Color.BLACK) })
+        val watcher = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, i: Intent) {
+                if (i.action != Intent.ACTION_USER_UNLOCKED) return
+                BootLog.i("event=user_unlocked rebuild")
+                unlockWatcher = null
+                runCatching { unregisterReceiver(this) }
+                (application as? App)?.onUserUnlocked()
+                recreate()
+            }
+        }
+        unlockWatcher = watcher
+        registerReceiver(watcher, IntentFilter(Intent.ACTION_USER_UNLOCKED))
+        // The unlock can land between the onCreate check and the registration above: never stay black.
+        if (Guard.isUserUnlocked(this)) {
+            unlockWatcher = null
+            runCatching { unregisterReceiver(watcher) }
+            (application as? App)?.onUserUnlocked()
+            main.post { recreate() }
+        }
     }
 
     // ------------------------------------------------------------------- intro
@@ -468,6 +512,12 @@ class HomeActivity : Activity(), TileAdapter.Listener {
     }
 
     override fun onDestroy() {
+        if (locked) {
+            unlockWatcher?.let { runCatching { unregisterReceiver(it) } }
+            unlockWatcher = null
+            super.onDestroy()
+            return
+        }
         resumed = false
         cancelIdle()
         wallpaperPlaying = false
@@ -1488,11 +1538,13 @@ class HomeActivity : Activity(), TileAdapter.Listener {
 
     override fun onUserInteraction() {
         super.onUserInteraction()
+        if (locked) return
         armIdle(resetDeadline = true)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        if (locked) return
         if (intro != null) BootLog.i("event=focus has=$hasFocus display=${BootIntroGate.displayLabel(displayState())}")
         intro?.onWindowFocus(hasFocus)
         val now = SystemClock.elapsedRealtime()
@@ -1504,6 +1556,7 @@ class HomeActivity : Activity(), TileAdapter.Listener {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (locked) return true // the cover is not interactive; the real screen follows on unlock
         armIdle(resetDeadline = true)
         welcome?.let { return it.key(event) }
         // Any key skips the intro to its closing zoom; nothing behind it reacts meanwhile.
@@ -1531,6 +1584,7 @@ class HomeActivity : Activity(), TileAdapter.Listener {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        if (locked) return
         if (intent.getBooleanExtra(Welcome.EXTRA_PREVIEW, false)) {
             intent.removeExtra(Welcome.EXTRA_PREVIEW)
             playWelcome(preview = true)
@@ -1553,12 +1607,14 @@ class HomeActivity : Activity(), TileAdapter.Listener {
 
     override fun onStart() {
         super.onStart()
+        if (locked) return
         Guard.ensure(this)
         main.postDelayed({ Guard.rebindIfStalled(this) }, 5_000)
     }
 
     override fun onResume() {
         super.onResume()
+        if (locked) return
         // Rebuild only after Settings changes column count; order/folders remain in Prefs.
         if (cols != prefs.dockColumns) { recreate(); return }
         val appearance = "${prefs.extremeGlass}:${prefs.glassTint(isNight())}:${prefs.solidGlass(this)}:${isNight()}"
@@ -1594,6 +1650,7 @@ class HomeActivity : Activity(), TileAdapter.Listener {
     }
 
     override fun onPause() {
+        if (locked) { super.onPause(); return }
         logPower("pause")
         HomeGuardService.onHomePaused()
         resumed = false

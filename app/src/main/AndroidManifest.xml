@@ -49,10 +49,16 @@
         <activity android:name=".UpdateActivity" android:exported="false" android:screenOrientation="landscape" />
         <service android:name=".UpdateJob" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="false" />
         <receiver android:name=".UpdateResult" android:exported="false" />
+        <!-- directBootAware: without it Android filters the home screen out of the HOME lookup
+             while the device is still locked during boot. Only the FallbackHome stubs of the two
+             Settings apps matched then, both at priority -1000, so the system had no winner and
+             put a "choose a home app" dialog on screen instead of the launcher. A real home
+             screen runs before unlock and covers the gap itself (see HomeActivity). -->
         <activity
             android:name=".HomeActivity"
             android:clearTaskOnLaunch="true"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode|density"
+            android:directBootAware="true"
             android:exported="true"
             android:launchMode="singleTask"
             android:resizeableActivity="false"
